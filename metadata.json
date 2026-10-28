@@ -1,0 +1,6 @@
+{
+  "name": "Vulcan - Progressive Overload & Gym Tracker",
+  "description": "Forging Peak Strength & Progressive Growth. Mobile-first gym workout tracker, custom exercise library, Accuniq body composition targets, rest timer, and progressive overload analytics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
