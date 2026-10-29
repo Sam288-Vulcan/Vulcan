@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Navigation, ScreenTab } from './components/Navigation.tsx';
 import { HomeCalendarView } from './components/HomeCalendarView.tsx';
 import { DailyLogView } from './components/DailyLogView.tsx';
@@ -11,6 +11,7 @@ import { ExerciseLibraryView } from './components/ExerciseLibraryView.tsx';
 import { UserProfileView } from './components/UserProfileView.tsx';
 import { AccuniqView } from './components/AccuniqView.tsx';
 import { ProgressView } from './components/ProgressView.tsx';
+import { CloudSyncPromptModal } from './components/CloudSyncPromptModal.tsx';
 import {
   DailyWorkout,
   AccuniqMetric,
@@ -33,6 +34,12 @@ import {
   initializeStorageIfNeeded,
   deleteDailyWorkout,
 } from './utils/storage.ts';
+import {
+  triggerBackgroundAutoSync,
+  checkForNewerCloudBackup,
+  restoreBackupPayload,
+  VulcanBackupPayload,
+} from './utils/googleDrive.ts';
 
 export default function App() {
   const [currentTab, setCurrentTab] = useState<ScreenTab>('calendar');
@@ -42,56 +49,90 @@ export default function App() {
   const [exerciseLibrary, setExerciseLibrary] = useState<CustomExercise[]>([]);
   const [userProfile, setUserProfileState] = useState<UserProfile>(() => getUserProfile());
 
-  // Initialize storage and load data
-  useEffect(() => {
-    initializeStorageIfNeeded();
+  // Cloud Sync Auto-Fetch Prompt state
+  const [cloudSyncPrompt, setCloudSyncPrompt] = useState<{
+    isOpen: boolean;
+    cloudPayload?: VulcanBackupPayload;
+    cloudDateStr?: string;
+  }>({ isOpen: false });
+
+  // Refresh all state from LocalStorage
+  const refreshAllStateFromStorage = useCallback(() => {
     setDailyWorkouts(getDailyWorkouts());
     setAccuniqMetrics(getAccuniqMetrics());
     setExerciseLibrary(getExerciseLibrary());
     setUserProfileState(getUserProfile());
   }, []);
 
-  // Update Daily Workout
+  // Initialize storage and check cloud backup on launch
+  useEffect(() => {
+    initializeStorageIfNeeded();
+    refreshAllStateFromStorage();
+
+    // Check for newer Google Drive cloud backup on app launch
+    checkForNewerCloudBackup()
+      .then((res) => {
+        if (res.hasNewerCloudBackup && res.cloudPayload) {
+          setCloudSyncPrompt({
+            isOpen: true,
+            cloudPayload: res.cloudPayload,
+            cloudDateStr: res.cloudDateStr,
+          });
+        }
+      })
+      .catch((e) => {
+        console.warn('Silent cloud check failed:', e);
+      });
+  }, [refreshAllStateFromStorage]);
+
+  // Update Daily Workout + Auto-Sync
   const handleSaveDailyWorkout = (updatedWorkout: DailyWorkout) => {
     saveDailyWorkout(updatedWorkout);
     setDailyWorkouts((prev) => ({
       ...prev,
       [updatedWorkout.date]: updatedWorkout,
     }));
+    triggerBackgroundAutoSync();
   };
 
-  // Exercise Library Handlers
+  // Delete Daily Workout + Auto-Sync
+  const handleDeleteDailyWorkout = (date: string) => {
+    deleteDailyWorkout(date);
+    setDailyWorkouts(getDailyWorkouts());
+    triggerBackgroundAutoSync();
+  };
+
+  // Exercise Library Handlers + Auto-Sync
   const handleSaveExercise = (exercise: CustomExercise) => {
     saveExerciseToLibrary(exercise);
     setExerciseLibrary(getExerciseLibrary());
+    triggerBackgroundAutoSync();
   };
 
   const handleDeleteExercise = (id: string) => {
     deleteExerciseFromLibrary(id);
     setExerciseLibrary(getExerciseLibrary());
+    triggerBackgroundAutoSync();
   };
 
-  // User Profile Handlers
+  // User Profile Handlers + Auto-Sync
   const handleSaveProfile = (profile: UserProfile) => {
     saveUserProfile(profile);
     setUserProfileState(profile);
+    triggerBackgroundAutoSync();
   };
 
-  // Accuniq Handlers
+  // Accuniq Handlers + Auto-Sync
   const handleSaveAccuniqMetric = (metric: AccuniqMetric) => {
     saveAccuniqMetric(metric);
     setAccuniqMetrics(getAccuniqMetrics());
+    triggerBackgroundAutoSync();
   };
 
   const handleDeleteAccuniqMetric = (id: string) => {
     deleteAccuniqMetric(id);
     setAccuniqMetrics(getAccuniqMetrics());
-  };
-
-  // Delete Daily Workout Handler
-  const handleDeleteDailyWorkout = (date: string) => {
-    deleteDailyWorkout(date);
-    setDailyWorkouts(getDailyWorkouts());
+    triggerBackgroundAutoSync();
   };
 
   // Open Daily Log from calendar date tap
@@ -164,16 +205,37 @@ export default function App() {
         )}
 
         {currentTab === 'progress' && (
-          <ProgressView dailyWorkouts={dailyWorkouts} />
+          <ProgressView
+            dailyWorkouts={dailyWorkouts}
+            accuniqMetrics={accuniqMetrics}
+            onNavigateToAccuniq={() => setCurrentTab('accuniq')}
+          />
         )}
 
         {currentTab === 'profile' && (
           <UserProfileView
             profile={userProfile}
             onSaveProfile={handleSaveProfile}
+            onDataRestored={refreshAllStateFromStorage}
           />
         )}
       </main>
+
+      {/* Auto-Fetch Prompt Modal when newer Google Drive backup is found */}
+      <CloudSyncPromptModal
+        isOpen={cloudSyncPrompt.isOpen}
+        cloudDateStr={cloudSyncPrompt.cloudDateStr}
+        onSyncNow={() => {
+          if (cloudSyncPrompt.cloudPayload) {
+            restoreBackupPayload(cloudSyncPrompt.cloudPayload);
+            refreshAllStateFromStorage();
+          }
+          setCloudSyncPrompt({ isOpen: false });
+        }}
+        onKeepLocal={() => {
+          setCloudSyncPrompt({ isOpen: false });
+        }}
+      />
     </div>
   );
 }

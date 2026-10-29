@@ -12,15 +12,18 @@ import {
   Calculator,
 } from 'lucide-react';
 import { UserProfile } from '../types/workout.ts';
+import { CloudSyncCard } from './CloudSyncCard.tsx';
 
 interface UserProfileViewProps {
   profile: UserProfile;
   onSaveProfile: (profile: UserProfile) => void;
+  onDataRestored?: () => void;
 }
 
 export const UserProfileView: React.FC<UserProfileViewProps> = ({
   profile,
   onSaveProfile,
+  onDataRestored,
 }) => {
   const [name, setName] = useState<string>(profile.name || 'Blesson');
   const [weightKg, setWeightKg] = useState<string>(
@@ -250,6 +253,9 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({
           </button>
         </div>
       </form>
+
+      {/* Requirement 2: Google Drive Cloud Sync & Storage Card */}
+      <CloudSyncCard onDataRestored={onDataRestored} />
     </div>
   );
 };
