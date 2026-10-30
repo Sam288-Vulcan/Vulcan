@@ -6,12 +6,14 @@ interface RestTimerProps {
   onFinish?: () => void;
   autoStartTrigger?: number;
   presetDuration?: number; // Exercise-specific rest timer preset
+  onTick?: (timeLeft: number, isRunning: boolean) => void;
 }
 
 export const RestTimer: React.FC<RestTimerProps> = ({
   onFinish,
   autoStartTrigger,
   presetDuration,
+  onTick,
 }) => {
   const [selectedDuration, setSelectedDuration] = useState<number>(presetDuration || 90);
   const [timeLeft, setTimeLeft] = useState<number>(presetDuration || 90);
@@ -75,6 +77,12 @@ export const RestTimer: React.FC<RestTimerProps> = ({
       if (timerRef.current) clearTimeout(timerRef.current);
     };
   }, [isRunning, timeLeft, soundEnabled, onFinish]);
+
+  useEffect(() => {
+    if (onTick) {
+      onTick(timeLeft, isRunning);
+    }
+  }, [timeLeft, isRunning, onTick]);
 
   const handleStart = () => {
     if (!hasStarted) {

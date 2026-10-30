@@ -234,3 +234,61 @@ export function getLastSessionForExercise(
   }
   return null;
 }
+
+export interface ExerciseSessionHistoryItem {
+  date: string;
+  entry: WeightliftingEntry;
+  estimated1RM: number;
+}
+
+/**
+ * Retrieves the last N sessions for a specific exercise across all historical workouts,
+ * sorted chronologically or reverse-chronologically.
+ */
+export function getExerciseHistorySessions(
+  exerciseName: string,
+  allWorkoutsInput?: Record<string, DailyWorkout>,
+  limit: number = 5
+): ExerciseSessionHistoryItem[] {
+  if (!exerciseName) return [];
+  const all = allWorkoutsInput || getDailyWorkouts();
+  const sortedDates = Object.keys(all).sort((a, b) => b.localeCompare(a)); // Newest first
+
+  const results: ExerciseSessionHistoryItem[] = [];
+  const exNameLower = exerciseName.trim().toLowerCase();
+
+  for (const date of sortedDates) {
+    const workout = all[date];
+    const matches = (workout.weightliftingEntries || []).filter(
+      (e) => e.exerciseName.trim().toLowerCase() === exNameLower
+    );
+
+    for (const entry of matches) {
+      // Calculate estimated 1RM (highest from non-warmup set or aggregate)
+      let highest1RM = 0;
+      if (entry.setRecords && entry.setRecords.length > 0) {
+        for (const s of entry.setRecords) {
+          if (s.setType === 'W') continue;
+          const est = s.weightKg * (1 + s.reps / 30);
+          if (est > highest1RM) highest1RM = est;
+        }
+      }
+      if (highest1RM === 0 && entry.weightKg > 0 && entry.reps > 0) {
+        highest1RM = entry.weightKg * (1 + entry.reps / 30);
+      }
+
+      results.push({
+        date,
+        entry,
+        estimated1RM: Math.round(highest1RM * 10) / 10,
+      });
+
+      if (results.length >= limit) break;
+    }
+
+    if (results.length >= limit) break;
+  }
+
+  return results;
+}
+

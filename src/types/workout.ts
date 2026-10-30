@@ -25,6 +25,19 @@ export interface UserProfile {
   updatedAt: number;
 }
 
+export type SetType = 'N' | 'W' | 'D' | 'F';
+
+export interface SetRecord {
+  setNumber: number;
+  weightKg: number;
+  reps: number;
+  setType: SetType; // 'N': Normal, 'W': Warm-Up, 'D': Drop Set, 'F': Failure
+  isCompleted?: boolean;
+  completedAt?: number;
+  isPr?: boolean;
+  estimated1RM?: number;
+}
+
 export interface WeightliftingEntry {
   id: string;
   exerciseName: string;
@@ -37,6 +50,8 @@ export interface WeightliftingEntry {
   volumeKg: number;
   caloriesBurned: number;
   notes?: string; // Set & exercise notes / technique cues
+  setRecords?: SetRecord[];
+  prsAchieved?: string[];
   timestamp: number;
 }
 

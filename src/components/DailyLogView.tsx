@@ -23,6 +23,8 @@ import {
   TrendingUp,
   RotateCcw,
   Zap,
+  History,
+  Award,
 } from 'lucide-react';
 import {
   DailyWorkout,
@@ -32,36 +34,56 @@ import {
   DAY_OF_WEEK_SPLITS,
   CustomExercise,
   UserProfile,
+  SetType,
+  SetRecord,
 } from '../types/workout.ts';
 import {
   calculateWeightliftingVolume,
   calculateWeightliftingCalories,
   calculateCardioCalories,
   predictProgressiveOverload,
+  calculate1RM,
+  calculateHistoricalExercisePR,
+  evaluateSetPR,
+  calculateAggregateSetsVolume,
 } from '../utils/calculations.ts';
 import {
   getLastSessionForExercise,
   parseDateKey,
 } from '../utils/storage.ts';
 import { RestTimer } from './RestTimer.tsx';
+import { ExerciseHistoryDrawer } from './ExerciseHistoryDrawer.tsx';
+import { WorkoutSummaryShareCard } from './WorkoutSummaryShareCard.tsx';
 
 interface DailyLogViewProps {
   selectedDate: string;
   dailyWorkout: DailyWorkout;
   exerciseLibrary: CustomExercise[];
   userProfile: UserProfile;
+  allWorkouts?: Record<string, DailyWorkout>;
   onSaveDailyWorkout: (workout: DailyWorkout) => void;
   onBackToCalendar: () => void;
   onNavigateToExerciseLibrary: () => void;
+  onActiveSessionUpdate?: (state: {
+    isActive: boolean;
+    stopwatchSeconds: number;
+    activeExerciseName: string;
+    restTimeLeft: number;
+    isRestRunning: boolean;
+  }) => void;
 }
 
-// Active set tracking item for guided logging
+// Active set tracking item with SetType and real-time PR badges
 interface ActiveSetItem {
   setNumber: number;
   weightKg: number;
   reps: number;
+  setType: SetType; // 'N': Normal, 'W': Warm-Up, 'D': Drop Set, 'F': Failure
   isCompleted: boolean;
   completedAt?: number;
+  isPr?: boolean;
+  badgeLabel?: string;
+  estimated1RM?: number;
 }
 
 export const DailyLogView: React.FC<DailyLogViewProps> = ({
@@ -69,9 +91,11 @@ export const DailyLogView: React.FC<DailyLogViewProps> = ({
   dailyWorkout,
   exerciseLibrary,
   userProfile,
+  allWorkouts = {},
   onSaveDailyWorkout,
   onBackToCalendar,
   onNavigateToExerciseLibrary,
+  onActiveSessionUpdate,
 }) => {
   // ----------------------------------------------------
   // WORKFLOW PHASES: 'setup' (Phase A) | 'active' (Phase B) | 'summary' (Phase C)
@@ -157,10 +181,14 @@ export const DailyLogView: React.FC<DailyLogViewProps> = ({
   };
 
   // ----------------------------------------------------
-  // UNIVERSAL REST TIMER TRIGGER (Auto-starts on set completion)
+  // UNIVERSAL REST TIMER TRIGGER & REAL-TIME STATE
   // ----------------------------------------------------
   const [restTimerTrigger, setRestTimerTrigger] = useState<number>(0);
   const [restToast, setRestToast] = useState<string | null>(null);
+  const [restTimerState, setRestTimerState] = useState<{ timeLeft: number; isRunning: boolean }>({
+    timeLeft: 90,
+    isRunning: false,
+  });
 
   const triggerAutoRest = (msg?: string) => {
     setRestTimerTrigger(Date.now());
@@ -169,6 +197,13 @@ export const DailyLogView: React.FC<DailyLogViewProps> = ({
       setTimeout(() => setRestToast(null), 3500);
     }
   };
+
+  // ----------------------------------------------------
+  // REAL-TIME PR CELEBRATIONS & HISTORY DRAWER STATE
+  // ----------------------------------------------------
+  const [isHistoryDrawerOpen, setIsHistoryDrawerOpen] = useState<boolean>(false);
+  const [activeExercisePrGlow, setActiveExercisePrGlow] = useState<string | null>(null);
+  const [prsAchievedThisSession, setPrsAchievedThisSession] = useState<string[]>([]);
 
   // ----------------------------------------------------
   // PHASE B ACTIVE EXERCISE STATE & AUTOMATIC DURATION TRACKING
@@ -180,11 +215,11 @@ export const DailyLogView: React.FC<DailyLogViewProps> = ({
   // Automatic exercise duration: track stopwatch timestamp when exercise starts
   const exerciseStartStopwatchSecondsRef = useRef<number>(0);
 
-  // Set-by-set tracker
+  // Set-by-set tracker with SetType (N: Normal, W: Warm-Up, D: Drop Set, F: Failure)
   const [activeSets, setActiveSets] = useState<ActiveSetItem[]>([
-    { setNumber: 1, weightKg: 60, reps: 10, isCompleted: false },
-    { setNumber: 2, weightKg: 60, reps: 10, isCompleted: false },
-    { setNumber: 3, weightKg: 60, reps: 10, isCompleted: false },
+    { setNumber: 1, weightKg: 60, reps: 10, setType: 'N', isCompleted: false },
+    { setNumber: 2, weightKg: 60, reps: 10, setType: 'N', isCompleted: false },
+    { setNumber: 3, weightKg: 60, reps: 10, setType: 'N', isCompleted: false },
   ]);
 
   // Synchronize initial active exercise selection with split exercises
@@ -214,28 +249,56 @@ export const DailyLogView: React.FC<DailyLogViewProps> = ({
   const lastSession = useMemo(() => {
     if (!activeExerciseName) return null;
     return getLastSessionForExercise(activeExerciseName, selectedDate);
-  }, [activeExerciseName, selectedDate, dailyWorkout]);
+  }, [activeExerciseName, selectedDate, dailyWorkout.weightliftingEntries.length]);
+
+  // Historical PR stats across all workouts for real-time PR comparisons
+  const exerciseHistoricalPR = useMemo(() => {
+    if (!activeExerciseName) return { maxWeightKg: 0, maxReps: 0, max1RM: 0 };
+    return calculateHistoricalExercisePR(
+      activeExerciseName,
+      allWorkouts,
+      selectedDate,
+      activeExerciseObj?.personalBest
+    );
+  }, [activeExerciseName, allWorkouts, selectedDate, activeExerciseObj?.personalBest]);
 
   const overloadSuggestion = useMemo(() => {
     return predictProgressiveOverload(lastSession);
   }, [lastSession]);
 
-  // Pre-populate sets weights & reps based on progressive overload recommendation
+  // Notify parent of active session state changes for floating dock
   useEffect(() => {
-    if (lastSession) {
-      const defaultWeight = lastSession.weightKg + overloadSuggestion.suggestedWeightAdditionKg;
-      const defaultReps = lastSession.reps || 10;
-      setActiveSets([
-        { setNumber: 1, weightKg: defaultWeight, reps: defaultReps, isCompleted: false },
-        { setNumber: 2, weightKg: defaultWeight, reps: defaultReps, isCompleted: false },
-        { setNumber: 3, weightKg: defaultWeight, reps: defaultReps, isCompleted: false },
-      ]);
-    } else {
-      setActiveSets([
-        { setNumber: 1, weightKg: 50, reps: 10, isCompleted: false },
-        { setNumber: 2, weightKg: 50, reps: 10, isCompleted: false },
-        { setNumber: 3, weightKg: 50, reps: 10, isCompleted: false },
-      ]);
+    if (onActiveSessionUpdate) {
+      onActiveSessionUpdate({
+        isActive: phase === 'active',
+        stopwatchSeconds,
+        activeExerciseName,
+        restTimeLeft: restTimerState.timeLeft,
+        isRestRunning: restTimerState.isRunning,
+      });
+    }
+  }, [phase, stopwatchSeconds, activeExerciseName, restTimerState, onActiveSessionUpdate]);
+
+  // Pre-populate sets weights & reps based on progressive overload recommendation when switching exercises
+  const lastInitializedExerciseRef = useRef<string>('');
+  useEffect(() => {
+    if (activeExerciseName && activeExerciseName !== lastInitializedExerciseRef.current) {
+      lastInitializedExerciseRef.current = activeExerciseName;
+      if (lastSession) {
+        const defaultWeight = lastSession.weightKg + overloadSuggestion.suggestedWeightAdditionKg;
+        const defaultReps = lastSession.reps || 10;
+        setActiveSets([
+          { setNumber: 1, weightKg: Math.max(20, defaultWeight - 15), reps: 12, setType: 'W', isCompleted: false },
+          { setNumber: 2, weightKg: defaultWeight, reps: defaultReps, setType: 'N', isCompleted: false },
+          { setNumber: 3, weightKg: defaultWeight, reps: defaultReps, setType: 'N', isCompleted: false },
+        ]);
+      } else {
+        setActiveSets([
+          { setNumber: 1, weightKg: 30, reps: 12, setType: 'W', isCompleted: false },
+          { setNumber: 2, weightKg: 50, reps: 10, setType: 'N', isCompleted: false },
+          { setNumber: 3, weightKg: 50, reps: 10, setType: 'N', isCompleted: false },
+        ]);
+      }
     }
   }, [activeExerciseName, lastSession, overloadSuggestion.suggestedWeightAdditionKg]);
 
@@ -252,6 +315,7 @@ export const DailyLogView: React.FC<DailyLogViewProps> = ({
         setNumber: i,
         weightKg: lastSession.weightKg,
         reps: lastSession.reps,
+        setType: i === 1 ? 'W' : 'N',
         isCompleted: false,
       });
     }
@@ -262,34 +326,103 @@ export const DailyLogView: React.FC<DailyLogViewProps> = ({
     );
   };
 
-  // Set-level management
+  // Set-level management with real-time PR evaluation
   const handleUpdateSet = (index: number, field: 'weightKg' | 'reps', val: number) => {
     setActiveSets((prev) => {
       const copy = [...prev];
-      copy[index] = { ...copy[index], [field]: Math.max(0, val) };
+      const updatedSet = { ...copy[index], [field]: Math.max(0, val) };
+      const prCheck = evaluateSetPR(
+        field === 'weightKg' ? val : updatedSet.weightKg,
+        field === 'reps' ? val : updatedSet.reps,
+        updatedSet.setType || 'N',
+        exerciseHistoricalPR,
+        activeExerciseName
+      );
+      copy[index] = {
+        ...updatedSet,
+        isPr: prCheck.isPr,
+        badgeLabel: prCheck.badgeLabel,
+        estimated1RM: prCheck.estimated1RM,
+      };
+      return copy;
+    });
+  };
+
+  const handleUpdateSetType = (index: number, newType: SetType) => {
+    setActiveSets((prev) => {
+      const copy = [...prev];
+      const target = copy[index];
+      const prCheck = evaluateSetPR(
+        target.weightKg,
+        target.reps,
+        newType,
+        exerciseHistoricalPR,
+        activeExerciseName
+      );
+      copy[index] = {
+        ...target,
+        setType: newType,
+        isPr: prCheck.isPr,
+        badgeLabel: prCheck.badgeLabel,
+        estimated1RM: prCheck.estimated1RM,
+      };
       return copy;
     });
   };
 
   const handleToggleCompleteSet = (index: number) => {
+    let prToGlow: string | null = null;
+    let prToRecord: string | null = null;
+    let restMessage = '';
+
     setActiveSets((prev) => {
       const copy = [...prev];
       const target = copy[index];
       const nextCompleted = !target.isCompleted;
+
+      const prCheck = evaluateSetPR(
+        target.weightKg,
+        target.reps,
+        target.setType || 'N',
+        exerciseHistoricalPR,
+        activeExerciseName
+      );
+
       copy[index] = {
         ...target,
         isCompleted: nextCompleted,
         completedAt: nextCompleted ? Date.now() : undefined,
+        isPr: prCheck.isPr,
+        badgeLabel: prCheck.badgeLabel,
+        estimated1RM: prCheck.estimated1RM,
       };
 
-      // Logging a set automatically starts the universal Rest Timer with audio feedback
       if (nextCompleted) {
-        triggerAutoRest(
-          `Set ${target.setNumber} logged (${target.weightKg}kg × ${target.reps} reps). Rest timer initiated!`
-        );
+        if (prCheck.isPr && target.setType !== 'W') {
+          prToGlow =
+            prCheck.celebrationMessage ||
+            `🔥 NEW PERSONAL RECORD! ${target.weightKg} kg × ${target.reps} reps (Est. 1RM: ${prCheck.estimated1RM} kg)!`;
+          prToRecord = `${activeExerciseName}: ${target.weightKg} kg × ${target.reps} reps (Est. 1RM: ${prCheck.estimated1RM} kg)`;
+        }
+
+        restMessage = `Set ${target.setNumber} logged (${target.weightKg}kg × ${target.reps} reps${
+          target.setType === 'W' ? ' - Warmup' : ''
+        }). Rest timer initiated!`;
       }
       return copy;
     });
+
+    if (prToGlow) {
+      setActiveExercisePrGlow(prToGlow);
+    }
+    if (prToRecord) {
+      setPrsAchievedThisSession((prevPrs) =>
+        prevPrs.includes(prToRecord!) ? prevPrs : [...prevPrs, prToRecord!]
+      );
+    }
+    if (restMessage) {
+      triggerAutoRest(restMessage);
+    }
   };
 
   const handleAddSetRow = () => {
@@ -302,6 +435,7 @@ export const DailyLogView: React.FC<DailyLogViewProps> = ({
           setNumber: newSetNumber,
           weightKg: last ? last.weightKg : 50,
           reps: last ? last.reps : 10,
+          setType: 'N',
           isCompleted: false,
         },
       ];
@@ -316,7 +450,7 @@ export const DailyLogView: React.FC<DailyLogViewProps> = ({
     });
   };
 
-  // Log active exercise into dailyWorkout with AUTOMATIC DURATION (Requirement 2)
+  // Log active exercise into dailyWorkout with AUTOMATIC DURATION & WARM-UP EXCLUSION
   const handleCommitActiveExercise = () => {
     if (!activeExerciseName) return;
 
@@ -328,14 +462,26 @@ export const DailyLogView: React.FC<DailyLogViewProps> = ({
     const completedCount = setsToLog.length;
     if (completedCount === 0) return;
 
-    // Calculate aggregate volume
-    const totalVolume = setsToLog.reduce((acc, s) => {
-      return acc + calculateWeightliftingVolume(1, s.reps, s.weightKg, isUnilateral);
-    }, 0);
+    // Calculate aggregate volume: WARM-UP SETS STRICTLY EXCLUDED
+    const totalVolume = calculateAggregateSetsVolume(setsToLog, isUnilateral);
 
-    // Representative weight and reps for summary display
-    const avgReps = Math.round(setsToLog.reduce((a, b) => a + b.reps, 0) / completedCount);
-    const maxWeight = Math.max(...setsToLog.map((s) => s.weightKg));
+    // Detailed set records
+    const setRecords: SetRecord[] = setsToLog.map((s) => ({
+      setNumber: s.setNumber,
+      weightKg: s.weightKg,
+      reps: s.reps,
+      setType: s.setType || 'N',
+      isCompleted: s.isCompleted,
+      completedAt: s.completedAt,
+      isPr: s.isPr,
+      estimated1RM: s.estimated1RM,
+    }));
+
+    // Representative weight and reps for working sets
+    const workingSets = setsToLog.filter((s) => s.setType !== 'W');
+    const representativeSets = workingSets.length > 0 ? workingSets : setsToLog;
+    const avgReps = Math.round(representativeSets.reduce((a, b) => a + b.reps, 0) / representativeSets.length);
+    const maxWeight = Math.max(...representativeSets.map((s) => s.weightKg));
 
     // AUTOMATIC DURATION: elapsed stopwatch seconds between starting and finishing this exercise
     const elapsedSeconds = Math.max(30, stopwatchSeconds - exerciseStartStopwatchSecondsRef.current);
@@ -355,6 +501,7 @@ export const DailyLogView: React.FC<DailyLogViewProps> = ({
       volumeKg: totalVolume,
       caloriesBurned,
       notes: exerciseNotes.trim() || undefined,
+      setRecords,
       timestamp: Date.now(),
     };
 
@@ -375,7 +522,7 @@ export const DailyLogView: React.FC<DailyLogViewProps> = ({
       }))
     );
 
-    triggerAutoRest(`Recorded ${activeExerciseName} (${totalVolume.toLocaleString()} kg). Rest up!`);
+    triggerAutoRest(`Recorded ${activeExerciseName} (${totalVolume.toLocaleString()} kg volume). Rest up!`);
   };
 
   // ----------------------------------------------------
@@ -833,18 +980,32 @@ export const DailyLogView: React.FC<DailyLogViewProps> = ({
               </button>
             </div>
 
-            {/* Exercise Selector with Rest Preset Indicator */}
+            {/* Exercise Selector with Rest Preset Indicator & 1RM History Drawer Button */}
             <div className="space-y-1.5">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <label htmlFor="active-exercise-dropdown" className="text-xs font-semibold text-zinc-300 uppercase tracking-wider block">
                   Current Exercise ({activeSplit})
                 </label>
-                {activeExerciseObj?.defaultRestSeconds && (
-                  <span className="text-[11px] font-mono text-[#03dac6] flex items-center gap-1">
-                    <Clock className="w-3 h-3" />
-                    Auto-Rest Preset: {activeExerciseObj.defaultRestSeconds}s
-                  </span>
-                )}
+                <div className="flex items-center gap-2">
+                  {activeExerciseObj?.defaultRestSeconds && (
+                    <span className="text-[11px] font-mono text-[#03dac6] flex items-center gap-1">
+                      <Clock className="w-3 h-3" />
+                      Rest: {activeExerciseObj.defaultRestSeconds}s
+                    </span>
+                  )}
+
+                  {/* Exercise History Slide-Over Drawer Trigger (Requirement 5) */}
+                  <button
+                    type="button"
+                    onClick={() => setIsHistoryDrawerOpen(true)}
+                    disabled={!activeExerciseName}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#bb86fc]/15 hover:bg-[#bb86fc]/25 text-[#bb86fc] border border-[#bb86fc]/40 text-xs font-bold transition-all active:scale-95 disabled:opacity-40"
+                    aria-label={`Open 1RM history and previous sessions for ${activeExerciseName}`}
+                  >
+                    <History className="w-3.5 h-3.5 text-[#03dac6]" />
+                    <span>1RM History</span>
+                  </button>
+                </div>
               </div>
 
               {splitExercises.length === 0 ? (
@@ -874,6 +1035,31 @@ export const DailyLogView: React.FC<DailyLogViewProps> = ({
                 </select>
               )}
             </div>
+
+            {/* Real-time Personal Record Banner Glow (Requirement 2) */}
+            {activeExercisePrGlow && (
+              <div className="p-3 bg-gradient-to-r from-[#2c1342] via-[#1b0f2a] to-[#2c1342] border-2 border-[#bb86fc] shadow-[0_0_25px_rgba(187,134,252,0.45)] text-white text-xs font-bold rounded-[14px] flex items-center justify-between animate-fade-in ring-1 ring-[#bb86fc]/40">
+                <div className="flex items-center gap-2.5">
+                  <div className="p-1.5 rounded-lg bg-[#bb86fc] text-black flex-shrink-0 shadow-md shadow-[#bb86fc]/40">
+                    <Trophy className="w-4 h-4 fill-black text-black animate-bounce" />
+                  </div>
+                  <div>
+                    <span className="text-[10px] font-extrabold uppercase tracking-widest text-[#03dac6] block">
+                      ★ PERSONAL RECORD ALERT ★
+                    </span>
+                    <span className="text-white text-xs font-black">{activeExercisePrGlow}</span>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveExercisePrGlow(null)}
+                  className="p-1 rounded text-zinc-400 hover:text-white text-xs"
+                  aria-label="Dismiss PR banner"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
 
             {/* Overload Target Reminder Box */}
             {activeExerciseName && (
@@ -944,22 +1130,24 @@ export const DailyLogView: React.FC<DailyLogViewProps> = ({
             {/* Set-by-Set Logging Rows */}
             <div className="space-y-2.5">
               <div className="flex items-center justify-between text-xs font-bold uppercase tracking-wider text-zinc-400 px-1">
-                <span>Set #</span>
-                <span className="ml-auto mr-16 sm:mr-24">Weight (kg) × Reps</span>
+                <span>Set # & Type</span>
+                <span className="text-center">Weight & Reps</span>
                 <span>Action / Rest</span>
               </div>
 
               {activeSets.map((set, idx) => (
                 <div
                   key={set.setNumber}
-                  className={`p-3 rounded-[12px] border transition-all flex flex-wrap items-center justify-between gap-2 sm:gap-4 ${
+                  className={`p-3 rounded-[14px] border transition-all flex flex-col md:flex-row md:items-center justify-between gap-3 ${
                     set.isCompleted
                       ? 'bg-[#03dac6]/10 border-[#03dac6]/50 shadow-sm'
+                      : set.isPr
+                      ? 'bg-[#bb86fc]/10 border-[#bb86fc]/60 shadow-[0_0_15px_rgba(187,134,252,0.2)]'
                       : 'bg-[#121212] border-zinc-800 hover:border-zinc-700'
                   }`}
                 >
-                  {/* Set Number Badge */}
-                  <div className="flex items-center gap-2">
+                  {/* Left: Set Number & Set Type Tag Selector (Requirement 1 & 2) */}
+                  <div className="flex flex-wrap items-center gap-2">
                     <span
                       className={`w-7 h-7 rounded-lg flex items-center justify-center font-mono font-bold text-xs ${
                         set.isCompleted
@@ -969,57 +1157,168 @@ export const DailyLogView: React.FC<DailyLogViewProps> = ({
                     >
                       #{set.setNumber}
                     </span>
-                    <span className="text-xs font-semibold text-zinc-300 hidden sm:inline">
-                      {set.isCompleted ? 'Completed' : 'Upcoming'}
-                    </span>
-                  </div>
 
-                  {/* Weight & Reps inputs */}
-                  <div className="flex items-center gap-2">
-                    <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-700 rounded-lg px-2 py-1">
-                      <label htmlFor={`set-${idx}-weight`} className="text-[11px] text-zinc-400 font-semibold">
-                        Wt:
-                      </label>
-                      <input
-                        id={`set-${idx}-weight`}
-                        type="number"
-                        step="2.5"
-                        min="0"
-                        max="300"
-                        value={set.weightKg}
-                        onChange={(e) => handleUpdateSet(idx, 'weightKg', Number(e.target.value))}
-                        className="w-16 bg-transparent text-white font-mono font-bold text-center text-sm focus:outline-none"
-                        aria-label={`Set ${set.setNumber} Weight in kg`}
-                      />
-                      <span className="text-[10px] text-zinc-500">kg</span>
+                    {/* Set Type Tagging Badges: Normal (N), Warm-Up (W), Drop Set (D), Failure (F) */}
+                    <div className="flex items-center gap-1 bg-zinc-900/90 p-1 rounded-lg border border-zinc-800">
+                      {(['N', 'W', 'D', 'F'] as const).map((t) => {
+                        const isSelected = (set.setType || 'N') === t;
+                        const label =
+                          t === 'N'
+                            ? 'Norm'
+                            : t === 'W'
+                            ? 'Warm-Up'
+                            : t === 'D'
+                            ? 'Drop'
+                            : 'Fail';
+
+                        const colorClasses =
+                          t === 'W'
+                            ? isSelected
+                              ? 'bg-amber-500 text-black font-black border-amber-400 shadow-sm'
+                              : 'bg-amber-500/10 text-amber-300/80 border-amber-500/30 hover:bg-amber-500/20'
+                            : t === 'D'
+                            ? isSelected
+                              ? 'bg-sky-500 text-black font-black border-sky-400 shadow-sm'
+                              : 'bg-sky-500/10 text-sky-300/80 border-sky-500/30 hover:bg-sky-500/20'
+                            : t === 'F'
+                            ? isSelected
+                              ? 'bg-rose-500 text-white font-black border-rose-400 shadow-sm'
+                              : 'bg-rose-500/10 text-rose-300/80 border-rose-500/30 hover:bg-rose-500/20'
+                            : isSelected
+                            ? 'bg-[#bb86fc] text-black font-black border-[#bb86fc] shadow-sm'
+                            : 'bg-zinc-800 text-zinc-400 border-zinc-700 hover:text-white';
+
+                        return (
+                          <button
+                            key={t}
+                            type="button"
+                            onClick={() => handleUpdateSetType(idx, t)}
+                            className={`px-1.5 py-0.5 rounded text-[10px] font-bold border transition-all active:scale-95 ${colorClasses}`}
+                            title={
+                              t === 'W'
+                                ? 'Warm-Up set: Logged in history, strictly excluded from Volume & progressive overload targets'
+                                : t === 'D'
+                                ? 'Drop set: Counted in volume'
+                                : t === 'F'
+                                ? 'Set taken to failure: Counted in volume'
+                                : 'Normal working set: Counted in volume'
+                            }
+                            aria-label={`Set ${set.setNumber} type ${label}`}
+                          >
+                            {t}
+                          </button>
+                        );
+                      })}
                     </div>
 
-                    <span className="text-zinc-500 font-bold">×</span>
+                    {/* Warm-Up indicator badge */}
+                    {set.setType === 'W' && (
+                      <span className="text-[10px] font-bold text-amber-400 bg-amber-500/15 border border-amber-500/30 px-1.5 py-0.5 rounded">
+                        Warmup (0 kg vol)
+                      </span>
+                    )}
 
-                    <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-700 rounded-lg px-2 py-1">
-                      <label htmlFor={`set-${idx}-reps`} className="text-[11px] text-zinc-400 font-semibold">
-                        Reps:
-                      </label>
-                      <input
-                        id={`set-${idx}-reps`}
-                        type="number"
-                        min="1"
-                        max="50"
-                        value={set.reps}
-                        onChange={(e) => handleUpdateSet(idx, 'reps', Number(e.target.value))}
-                        className="w-14 bg-transparent text-white font-mono font-bold text-center text-sm focus:outline-none"
-                        aria-label={`Set ${set.setNumber} Reps`}
-                      />
-                      <span className="text-[10px] text-zinc-500">reps</span>
+                    {/* Real-time PR badge if active set qualifies */}
+                    {set.isPr && set.setType !== 'W' && (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-gradient-to-r from-[#bb86fc] to-[#03dac6] text-black shadow-md shadow-[#bb86fc]/40 animate-pulse flex items-center gap-1 border border-white/30">
+                        <Trophy className="w-3 h-3 fill-black text-black" />
+                        <span>{set.badgeLabel || 'NEW PR'}</span>
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Center: Weight & Reps with Quick-Adjust Increment Buttons (Requirement 3) */}
+                  <div className="flex flex-wrap items-center gap-3">
+                    {/* Weight Stepper: -2.5 kg, Input, +2.5 kg */}
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => handleUpdateSet(idx, 'weightKg', Math.max(0, set.weightKg - 2.5))}
+                        className="px-2 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white font-mono font-bold text-xs active:scale-90 transition-all border border-zinc-700"
+                        title="-2.5 kg"
+                        aria-label={`Decrease set ${set.setNumber} weight by 2.5 kg`}
+                      >
+                        -2.5
+                      </button>
+
+                      <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-700 rounded-lg px-2 py-1">
+                        <label htmlFor={`set-${idx}-weight`} className="sr-only">
+                          Weight
+                        </label>
+                        <input
+                          id={`set-${idx}-weight`}
+                          type="number"
+                          step="2.5"
+                          min="0"
+                          max="400"
+                          value={set.weightKg}
+                          onChange={(e) => handleUpdateSet(idx, 'weightKg', Number(e.target.value))}
+                          className="w-14 bg-transparent text-white font-mono font-bold text-center text-sm focus:outline-none"
+                          aria-label={`Set ${set.setNumber} Weight in kg`}
+                        />
+                        <span className="text-[10px] text-zinc-500">kg</span>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => handleUpdateSet(idx, 'weightKg', set.weightKg + 2.5)}
+                        className="px-2 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white font-mono font-bold text-xs active:scale-90 transition-all border border-zinc-700"
+                        title="+2.5 kg"
+                        aria-label={`Increase set ${set.setNumber} weight by 2.5 kg`}
+                      >
+                        +2.5
+                      </button>
+                    </div>
+
+                    <span className="text-zinc-600 font-bold">×</span>
+
+                    {/* Reps Stepper: -1 rep, Input, +1 rep */}
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => handleUpdateSet(idx, 'reps', Math.max(1, set.reps - 1))}
+                        className="px-2 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white font-mono font-bold text-xs active:scale-90 transition-all border border-zinc-700"
+                        title="-1 rep"
+                        aria-label={`Decrease set ${set.setNumber} reps by 1`}
+                      >
+                        -1
+                      </button>
+
+                      <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-700 rounded-lg px-2 py-1">
+                        <label htmlFor={`set-${idx}-reps`} className="sr-only">
+                          Reps
+                        </label>
+                        <input
+                          id={`set-${idx}-reps`}
+                          type="number"
+                          min="1"
+                          max="100"
+                          value={set.reps}
+                          onChange={(e) => handleUpdateSet(idx, 'reps', Number(e.target.value))}
+                          className="w-12 bg-transparent text-white font-mono font-bold text-center text-sm focus:outline-none"
+                          aria-label={`Set ${set.setNumber} Reps`}
+                        />
+                        <span className="text-[10px] text-zinc-500">reps</span>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => handleUpdateSet(idx, 'reps', set.reps + 1)}
+                        className="px-2 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-300 hover:text-white font-mono font-bold text-xs active:scale-90 transition-all border border-zinc-700"
+                        title="+1 rep"
+                        aria-label={`Increase set ${set.setNumber} reps by 1`}
+                      >
+                        +1
+                      </button>
                     </div>
                   </div>
 
                   {/* Actions: Complete Set & auto-start rest timer, or remove set */}
-                  <div className="flex items-center gap-2 ml-auto">
+                  <div className="flex items-center gap-2 self-end md:self-auto">
                     <button
                       type="button"
                       onClick={() => handleToggleCompleteSet(idx)}
-                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all active:scale-95 ${
+                      className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all active:scale-95 ${
                         set.isCompleted
                           ? 'bg-[#03dac6] text-black shadow-md shadow-[#03dac6]/20'
                           : 'bg-[#bb86fc]/20 hover:bg-[#bb86fc]/30 text-[#bb86fc] border border-[#bb86fc]/40'
@@ -1433,6 +1732,19 @@ export const DailyLogView: React.FC<DailyLogViewProps> = ({
               )}
             </div>
 
+            {/* Aesthetic Workout Summary Share Card & PNG Download (Requirement 6) */}
+            <div className="border-t border-zinc-800 pt-4">
+              <WorkoutSummaryShareCard
+                dailyWorkout={dailyWorkout}
+                userName={userProfile.name}
+                durationSeconds={stopwatchSeconds}
+                totalVolumeKg={totalVolumeToday}
+                totalCalories={totalCaloriesToday}
+                totalSets={totalSetsCompletedToday}
+                prsAchieved={prsAchievedThisSession}
+              />
+            </div>
+
             {/* Modal Actions */}
             <div className="pt-2 flex flex-col sm:flex-row gap-3">
               <button
@@ -1457,6 +1769,14 @@ export const DailyLogView: React.FC<DailyLogViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* Exercise History Slide-Over Drawer with Recharts 1RM curve (Requirement 5) */}
+      <ExerciseHistoryDrawer
+        isOpen={isHistoryDrawerOpen}
+        onClose={() => setIsHistoryDrawerOpen(false)}
+        exerciseName={activeExerciseName}
+        allWorkouts={allWorkouts}
+      />
     </div>
   );
 };

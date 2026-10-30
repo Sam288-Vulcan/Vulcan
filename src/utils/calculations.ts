@@ -1,18 +1,207 @@
-import { WeightliftingEntry } from '../types/workout.ts';
+import { WeightliftingEntry, SetType, SetRecord, DailyWorkout } from '../types/workout.ts';
+
+/**
+ * Estimated 1RM (Epley Formula):
+ * 1RM = Weight × (1 + Reps / 30)
+ * Note: If reps === 1, 1RM is simply the weight lifted.
+ */
+export function calculate1RM(weightKg: number, reps: number): number {
+  if (weightKg <= 0 || reps <= 0) return 0;
+  if (reps === 1) return Math.round(weightKg * 10) / 10;
+  const oneRm = weightKg * (1 + reps / 30);
+  return Math.round(oneRm * 10) / 10;
+}
 
 /**
  * Weightlifting Volume = Sets × Reps × Weight × (Unilateral ? 2 : 1)
+ * Warm-up sets (setType === 'W') are excluded from total volume (returns 0).
  */
 export function calculateWeightliftingVolume(
   sets: number,
   reps: number,
   weightKg: number,
-  isUnilateral: boolean
+  isUnilateral: boolean,
+  setType?: SetType
 ): number {
+  if (setType === 'W') return 0;
   if (sets <= 0 || reps <= 0 || weightKg <= 0) return 0;
   const multiplier = isUnilateral ? 2 : 1;
   const volume = sets * reps * weightKg * multiplier;
   return Math.round(volume * 100) / 100;
+}
+
+/**
+ * Calculate aggregate volume from a list of sets.
+ * Warm-up sets (W) are strictly excluded from volume.
+ */
+export function calculateAggregateSetsVolume(
+  sets: Array<{ weightKg: number; reps: number; setType?: SetType; isCompleted?: boolean }>,
+  isUnilateral: boolean
+): number {
+  const multiplier = isUnilateral ? 2 : 1;
+  return sets.reduce((acc, s) => {
+    if (s.setType === 'W') return acc;
+    if (s.weightKg <= 0 || s.reps <= 0) return acc;
+    return acc + Math.round(s.weightKg * s.reps * multiplier * 100) / 100;
+  }, 0);
+}
+
+export interface HistoricalPRStats {
+  maxWeightKg: number;
+  maxReps: number;
+  max1RM: number;
+}
+
+/**
+ * Compute historical bests (max weight, max reps, max 1RM) for a given exercise
+ * across all previous workouts. Warm-up sets are excluded from personal records.
+ */
+export function calculateHistoricalExercisePR(
+  exerciseName: string,
+  dailyWorkouts: Record<string, DailyWorkout>,
+  excludeDate?: string,
+  personalBestString?: string
+): HistoricalPRStats {
+  let maxWeightKg = 0;
+  let maxReps = 0;
+  let max1RM = 0;
+
+  if (personalBestString) {
+    const match = personalBestString.match(/([0-9.]+)\s*(?:kg)?\s*[×x*]\s*([0-9]+)/i);
+    if (match) {
+      const pbWeight = parseFloat(match[1]);
+      const pbReps = parseInt(match[2], 10);
+      if (!isNaN(pbWeight) && pbWeight > 0) {
+        maxWeightKg = pbWeight;
+      }
+      if (!isNaN(pbReps) && pbReps > 0) {
+        maxReps = pbReps;
+      }
+      if (maxWeightKg > 0 && maxReps > 0) {
+        max1RM = calculate1RM(maxWeightKg, maxReps);
+      }
+    } else {
+      const singleNum = parseFloat(personalBestString);
+      if (!isNaN(singleNum) && singleNum > 0) {
+        maxWeightKg = singleNum;
+        max1RM = singleNum;
+      }
+    }
+  }
+
+  if (!exerciseName) {
+    return { maxWeightKg: 0, maxReps: 0, max1RM: 0 };
+  }
+
+  const exNameLower = exerciseName.trim().toLowerCase();
+
+  for (const [date, workout] of Object.entries(dailyWorkouts)) {
+    if (excludeDate && date === excludeDate) continue;
+
+    for (const entry of workout.weightliftingEntries || []) {
+      if (entry.exerciseName.trim().toLowerCase() !== exNameLower) continue;
+
+      // Check detailed set records if present
+      if (entry.setRecords && entry.setRecords.length > 0) {
+        for (const s of entry.setRecords) {
+          if (s.setType === 'W') continue; // Exclude warmups from PRs
+          if (s.weightKg > maxWeightKg) maxWeightKg = s.weightKg;
+          if (s.reps > maxReps) maxReps = s.reps;
+          const est = calculate1RM(s.weightKg, s.reps);
+          if (est > max1RM) max1RM = est;
+        }
+      } else {
+        // Fallback to entry aggregates
+        if (entry.weightKg > maxWeightKg) maxWeightKg = entry.weightKg;
+        if (entry.reps > maxReps) maxReps = entry.reps;
+        const est = calculate1RM(entry.weightKg, entry.reps);
+        if (est > max1RM) max1RM = est;
+      }
+    }
+  }
+
+  return {
+    maxWeightKg: Math.round(maxWeightKg * 10) / 10,
+    maxReps,
+    max1RM: Math.round(max1RM * 10) / 10,
+  };
+}
+
+export interface PRCheckResult {
+  isPr: boolean;
+  isWeightPR: boolean;
+  is1RMPR: boolean;
+  isRepsPR: boolean;
+  estimated1RM: number;
+  badgeLabel?: string;
+  celebrationMessage?: string;
+}
+
+/**
+ * Evaluates whether an active set beats previous historical records in real-time.
+ * Warm-up sets (setType === 'W') do not qualify for PR celebrations.
+ */
+export function evaluateSetPR(
+  weightKg: number,
+  reps: number,
+  setType: SetType,
+  history: HistoricalPRStats,
+  exerciseName: string
+): PRCheckResult {
+  const estimated1RM = calculate1RM(weightKg, reps);
+
+  if (setType === 'W' || weightKg <= 0 || reps <= 0) {
+    return {
+      isPr: false,
+      isWeightPR: false,
+      is1RMPR: false,
+      isRepsPR: false,
+      estimated1RM,
+    };
+  }
+
+  // If there's no prior history (e.g. 0), establish baseline record
+  if (history.maxWeightKg === 0 && history.max1RM === 0) {
+    return {
+      isPr: true,
+      isWeightPR: true,
+      is1RMPR: true,
+      isRepsPR: true,
+      estimated1RM,
+      badgeLabel: 'NEW PR',
+      celebrationMessage: `🔥 BASELINE RECORD ESTABLISHED! ${weightKg} kg × ${reps} reps (Est. 1RM: ${estimated1RM} kg on ${exerciseName})!`,
+    };
+  }
+
+  const isWeightPR = weightKg > history.maxWeightKg;
+  const is1RMPR = estimated1RM > history.max1RM;
+  const isRepsPR = reps > history.maxReps && weightKg >= history.maxWeightKg * 0.9;
+
+  const isPr = isWeightPR || is1RMPR;
+
+  let badgeLabel = 'NEW PR';
+  let celebrationMessage = '';
+
+  if (is1RMPR && isWeightPR) {
+    badgeLabel = 'ALL-TIME PR';
+    celebrationMessage = `🔥 NEW PERSONAL RECORD! ${weightKg} kg × ${reps} reps (Est. 1RM: ${estimated1RM} kg on ${exerciseName})!`;
+  } else if (isWeightPR) {
+    badgeLabel = 'WEIGHT PR';
+    celebrationMessage = `🔥 NEW WEIGHT PR! ${weightKg} kg lifted on ${exerciseName}!`;
+  } else if (is1RMPR) {
+    badgeLabel = '1RM PR';
+    celebrationMessage = `🔥 NEW ESTIMATED 1RM! ${estimated1RM} kg on ${exerciseName} (${weightKg} kg × ${reps} reps)!`;
+  }
+
+  return {
+    isPr,
+    isWeightPR,
+    is1RMPR,
+    isRepsPR,
+    estimated1RM,
+    badgeLabel,
+    celebrationMessage,
+  };
 }
 
 /**

@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Navigation, ScreenTab } from './components/Navigation.tsx';
 import { HomeCalendarView } from './components/HomeCalendarView.tsx';
 import { DailyLogView } from './components/DailyLogView.tsx';
@@ -12,6 +12,7 @@ import { UserProfileView } from './components/UserProfileView.tsx';
 import { AccuniqView } from './components/AccuniqView.tsx';
 import { ProgressView } from './components/ProgressView.tsx';
 import { CloudSyncPromptModal } from './components/CloudSyncPromptModal.tsx';
+import { ActiveWorkoutDock } from './components/ActiveWorkoutDock.tsx';
 import {
   DailyWorkout,
   AccuniqMetric,
@@ -55,6 +56,21 @@ export default function App() {
     cloudPayload?: VulcanBackupPayload;
     cloudDateStr?: string;
   }>({ isOpen: false });
+
+  // Floating Active Workout Dock State (Requirement 4)
+  const [activeWorkoutSession, setActiveWorkoutSession] = useState<{
+    isActive: boolean;
+    stopwatchSeconds: number;
+    activeExerciseName: string;
+    restTimeLeft: number;
+    isRestRunning: boolean;
+  }>({
+    isActive: false,
+    stopwatchSeconds: 0,
+    activeExerciseName: '',
+    restTimeLeft: 0,
+    isRestRunning: false,
+  });
 
   // Refresh all state from LocalStorage
   const refreshAllStateFromStorage = useCallback(() => {
@@ -147,7 +163,10 @@ export default function App() {
   };
 
   // Current selected day's workout data
-  const currentWorkout = dailyWorkouts[selectedDate] || getDailyWorkout(selectedDate);
+  const currentWorkout = useMemo(
+    () => dailyWorkouts[selectedDate] || getDailyWorkout(selectedDate),
+    [dailyWorkouts, selectedDate]
+  );
 
   return (
     <div className="min-h-screen bg-[#121212] text-zinc-100 flex flex-col md:flex-row antialiased selection:bg-[#bb86fc]/30 selection:text-[#bb86fc]">
@@ -174,17 +193,20 @@ export default function App() {
           />
         )}
 
-        {currentTab === 'dailylog' && (
+        {/* Daily Log View: Preserved in DOM so active workout stopwatch and sets never reset on tab switch */}
+        <div className={currentTab === 'dailylog' ? 'block' : 'hidden'}>
           <DailyLogView
             selectedDate={selectedDate}
             dailyWorkout={currentWorkout}
             exerciseLibrary={exerciseLibrary}
             userProfile={userProfile}
+            allWorkouts={dailyWorkouts}
             onSaveDailyWorkout={handleSaveDailyWorkout}
             onBackToCalendar={handleBackToCalendar}
             onNavigateToExerciseLibrary={() => setCurrentTab('library')}
+            onActiveSessionUpdate={setActiveWorkoutSession}
           />
-        )}
+        </div>
 
         {currentTab === 'library' && (
           <ExerciseLibraryView
@@ -235,6 +257,16 @@ export default function App() {
         onKeepLocal={() => {
           setCloudSyncPrompt({ isOpen: false });
         }}
+      />
+
+      {/* Floating Active Workout Mini-Dock (Requirement 4) */}
+      <ActiveWorkoutDock
+        isVisible={currentTab !== 'dailylog' && activeWorkoutSession.isActive}
+        stopwatchSeconds={activeWorkoutSession.stopwatchSeconds}
+        currentExerciseName={activeWorkoutSession.activeExerciseName}
+        restTimeLeft={activeWorkoutSession.restTimeLeft}
+        isRestRunning={activeWorkoutSession.isRestRunning}
+        onReturnToWorkout={() => setCurrentTab('dailylog')}
       />
     </div>
   );
